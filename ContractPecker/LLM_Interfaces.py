@@ -3,7 +3,7 @@ from openai import OpenAI
 from transformers import T5ForConditionalGeneration, T5Tokenizer, AutoTokenizer, AutoModelForCausalLM
 
 class LLM:
-    api_keys = {"openai":'sk-proj-dsafeuxD9U1KkBN6TRMrT3BlbkFJrmZ2ptMSKxNcKebS2KZI'}
+    # api_keys = {"openai":''}
     model_name = "gpt-3.5-turbo"
     
     def __init__(self, model_name, api_key = '') -> None:
@@ -11,11 +11,11 @@ class LLM:
         match model_name:
             case 'gpt-3.5-turbo':
                 if api_key != '':
-                    self.api_keys["openai"] = api_key
+                    self.api_keys = api_key
                 self.initialize_gpt()
             case 'gpt-4':
                 if api_key != '':
-                    self.api_keys["openai"] = api_key
+                    self.api_keys = api_key
                 self.initialize_gpt()
             case 'CodeT5':
                 self.initialize_codet5()
@@ -25,7 +25,7 @@ class LLM:
                 print("Model is not supported by this tool!")
 
     def initialize_gpt(self):
-        self.client = OpenAI(api_key=self.api_keys["openai"])
+        self.client = OpenAI(api_key=self.api_keys)
 
     def initialize_codet5(self):
         self.model = T5ForConditionalGeneration.from_pretrained('Salesforce/codet5-base')
@@ -63,7 +63,6 @@ if __name__ == "__main__":
     print('test')
     test = LLM('gpt-3.5-turbo')
     test.initialize_gpt()
-    print(test.LLMAnalyze("北京大学是什么?"))
     
 
 
