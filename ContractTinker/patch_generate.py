@@ -17,8 +17,11 @@ class CustomLogger(logging.Logger):
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         self.addHandler(handler)
-        handler = logging.FileHandler(name)
-        self.addHandler(handler)
+
+        file_handler = logging.FileHandler('logfile.log')
+        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        self.addHandler(file_handler)
 
 def arguments():
     parser = argparse.ArgumentParser(description='Requir report path; project path, solc_remaps')
@@ -125,40 +128,12 @@ def gather_code_snippets(function_elements,contract_elements,relevant_function_e
                 body = get_func_body(tmp_slither,ele)
                 contracts_codes[contract][ele] = body
         
-        for ele,cot in relevant_function_elements.items():
-            if contract in cot:
-                body = get_func_body(tmp_slither,ele)
-                contracts_codes[contract][ele] = body
+        # for ele,cot in relevant_function_elements.items():
+        #     if contract in cot:
+        #         body = get_func_body(tmp_slither,ele)
+        #         contracts_codes[contract][ele] = body
 
     return contracts_codes    
-
-def contextual_prepare(structural_infos,interaction_graph,contracts,agent):
-    # print("Program slicing...")
-    ## First extracting relevant elements based on documents info
-    vul_loc = structural_infos['Vulnerability location']
-    vul_desc = structural_infos['Vulnerability description']
-    vul_loc = {}
-    if len(vul_loc) != 0:
-        print("Extracting relevant elements based on regex funcs...")
-        target_functions = extract_target_functions(vul_loc)
-        target_rel_eles = []
-        for func in target_functions:
-            RAG_function = contracts.get(func,[])
-            target_rel_eles.extend(RAG_function)
-    
-    ## query relevant functions by llm
-
-    # testing
-    response = promptUtils.query_relevant_elements(vul_desc,agent)
-    elements_lists = response.strip('[]').split(', ')
-    # elements_lists = ['MarginRouter', 'crossSwapExactTokensForTokens', '_swapExactT4T', '_swap', 'amounts', 'pairs', 'tokens', 'registerTrade', 'startingBalance', 'pair', 'FUND', 'ATTACKER_CONTRACT', 'WETH', 'WBTC', 'WETH_WBTC_PAIR']
-    function_elements,contract_elements,core_contract_functions,other_contract_functions = elements_matching(elements_lists,contracts)
-
-    relevant_function_elements,function_pairs = relevant_functions(function_elements,interaction_graph,core_contract_functions,other_contract_functions)
-
-    code_snippets = gather_code_snippets(function_elements,contract_elements,relevant_function_elements,contracts)
-
-    return function_elements,relevant_function_elements,code_snippets,function_pairs
 
 class Repair:
     def __init__(self,report_path,project_path,solc_remaps='',model_name='gpt-3.5-turbo') -> None:
@@ -193,6 +168,34 @@ class Repair:
         self.generator = LLM(model_name)
         self.validator = LLM("gpt-4")
 
+    def contextual_prepare(self,structural_infos):
+        ## First extracting relevant elements based on documents info
+        vul_loc = structural_infos['Vulnerability location']
+        vul_desc = structural_infos['Vulnerability description']
+        vul_loc = {}
+        if len(vul_loc) != 0:
+            print("Extracting relevant elements based on regex funcs...")
+            target_functions = extract_target_functions(vul_loc)
+            target_rel_eles = []
+            for func in target_functions:
+                RAG_function = self.contracts.get(func,[])
+                target_rel_eles.extend(RAG_function)
+        
+        ## query relevant functions by llm
+        response = promptUtils.query_relevant_elements(vul_desc,self.generator)
+        
+        response = response.split(',')
+        elements_lists = [re.sub("\n|\[|\]","",ele)  for ele in response]
+
+
+        function_elements,contract_elements,core_contract_functions,other_contract_functions = elements_matching(elements_lists,self.contracts)
+
+        relevant_function_elements,function_pairs = relevant_functions(function_elements,self.interaction_graph,core_contract_functions,other_contract_functions)
+
+        code_snippets = gather_code_snippets(function_elements,contract_elements,relevant_function_elements,self.contracts)
+
+        return function_elements,relevant_function_elements,code_snippets,function_pairs
+
     def chainOfprompts(self,structural_infos,context):
         vul_desc = structural_infos['Vulnerability description']
         function_interactions = "\n".join([" -> ".join(pair) for pair in context[-1]])
@@ -202,6 +205,9 @@ class Repair:
             codes = "\n".join(v.values())
             codes = k+"\n"+codes+"\n"
             self.contract_codes.append(codes)
+
+        print("contract codes")
+        print(self.contract_codes)
 
         self.logger.info("Attack Procedure analyzing...")
         attack_procedures = promptUtils.attack_analysis(vul_desc,function_interactions,self.generator)
@@ -215,6 +221,7 @@ class Repair:
         # supple_codes = promptUtils.code_supplement("\n".join(contract_codes),attack_procedures,self.generator)
 
         self.logger.info("Patch generating...")
+        # self.logger.info("\n".join(self.contract_codes))
         codes_pairs = promptUtils.code_generate("\n".join(self.contract_codes),attack_procedures,strategies,self.generator)
 
         # self.logger.info(codes_pairs)
@@ -240,17 +247,15 @@ class Repair:
 
         ## 以一个漏洞为例进行分析
         structural_infos = self.structural_informations[risk_name]
-        interaction_graph = self.project_info.edge_relations
-        contracts = self.project_info.contracts
+        self.interaction_graph = self.project_info.edge_relations
+        self.contracts = self.project_info.contracts
         
         #context = function_elements,relevant_function_elements,code_snippets,function_pairs
-        self.context = contextual_prepare(structural_infos,interaction_graph,contracts,self.generator)
-        self.patch_pairs = self.chainOfprompts(structural_infos,self.context)
+        context = self.contextual_prepare(structural_infos)
+        self.patch_pairs = self.chainOfprompts(structural_infos,context)
 
-        final_patches = self.validate(structural_infos)
-
-        self.logger.info("Successfully!")
-        return final_patches
+        # final_patches = self.validate(structural_infos)
+        return self.patch_pairs
 
 if __name__ == "__main__":
 
@@ -282,3 +287,5 @@ if __name__ == "__main__":
         formatted_time = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time()))
         with open(f"result_{formatted_time}.txt",'w') as f:
             f.write(result)
+
+    # python patch_generate.py --report_path "/home/LLM4APR/dataset/3/3.md" --project_path "/home/LLM4APR/dataset/3/" --vul_name "Missing \`fromToken != toToken\` check" --solc_remaps "@openzeppelin=/home/LLM4APR/dataset/3/contracts_3/contracts/node_modules/@openzeppelin @uniswap=/home/LLM4APR/dataset/3/contracts_3/contracts/node_modules/@uniswap hardhat=/home/LLM4APR/dataset/3/contracts_3/contracts/node_modules/hardhat interfaces=/home/LLM4APR/dataset/3/contracts_3/interfaces" --output "./results.txt"
