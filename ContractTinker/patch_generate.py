@@ -1,38 +1,36 @@
 import re
 import os
-# from ContractPecker.program_analysis import StaticUtils
-# from ContractPecker.LLM_Interfaces import LLM
-# from ContractPecker.DocumentParsing import documentParsing
-# from ContractPecker.promptsUtils import promptUtils
-
+import logging
+import time
 from program_analysis import StaticUtils
 from LLM_Interfaces import LLM
 from DocumentParsing import documentParsing
 from promptsUtils import promptUtils
 import argparse
-import logging
 
-log_directory = 'logs'
-if not os.path.exists(log_directory):
-    os.makedirs(log_directory)
+class CustomLogger(logging.Logger):
+    def __init__(self, name, level=logging.NOTSET):
+        super().__init__(name, level)
+        self.propagate = False
 
-logging.basicConfig(level=logging.DEBUG,  # 设置日志级别
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',  # 设置日志格式
-                    datefmt='%Y-%m-%d %H:%M:%S',  # 设置时间格式
-                    handlers=[
-                        logging.FileHandler('test.log'),  # 将日志输出到文件
-                        logging.StreamHandler()  # 将日志输出到控制台
-                    ])
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.addHandler(handler)
+        handler = logging.FileHandler(name)
+        self.addHandler(handler)
 
 def arguments():
     parser = argparse.ArgumentParser(description='Requir report path; project path, solc_remaps')
     
     parser.add_argument('--report_path', type=str, required=True, help='report path')
     parser.add_argument('--project_path', type=str, required=True, help='project path')
-    parser.add_argument('--solc_remaps', type=str, required=True, help='solc remapping for compile')
+    parser.add_argument('--solc_remaps', type=str, required=False, help='solc remapping for compile')
+    parser.add_argument('--vul_name', type=str, required=False, help='vulnerability name')
+    parser.add_argument('--output', type=str, required=False, help='output path')
 
     args = parser.parse_args()
-    return args.report_path,args.project_path,args.solc_remaps
+    return args
 
 def elements_matching(elements_lists,contracts):
     ## contract name matching
@@ -135,7 +133,7 @@ def gather_code_snippets(function_elements,contract_elements,relevant_function_e
     return contracts_codes    
 
 def contextual_prepare(structural_infos,interaction_graph,contracts,agent):
-    print("start CIG...")
+    # print("Program slicing...")
     ## First extracting relevant elements based on documents info
     vul_loc = structural_infos['Vulnerability location']
     vul_desc = structural_infos['Vulnerability description']
@@ -151,9 +149,9 @@ def contextual_prepare(structural_infos,interaction_graph,contracts,agent):
     ## query relevant functions by llm
 
     # testing
-    # response = promptUtils.query_relevant_elements(vul_desc,agent)
-    # elements_lists = response.strip('[]').split(', ')
-    elements_lists = ['MarginRouter', 'crossSwapExactTokensForTokens', '_swapExactT4T', '_swap', 'amounts', 'pairs', 'tokens', 'registerTrade', 'startingBalance', 'pair', 'FUND', 'ATTACKER_CONTRACT', 'WETH', 'WBTC', 'WETH_WBTC_PAIR']
+    response = promptUtils.query_relevant_elements(vul_desc,agent)
+    elements_lists = response.strip('[]').split(', ')
+    # elements_lists = ['MarginRouter', 'crossSwapExactTokensForTokens', '_swapExactT4T', '_swap', 'amounts', 'pairs', 'tokens', 'registerTrade', 'startingBalance', 'pair', 'FUND', 'ATTACKER_CONTRACT', 'WETH', 'WBTC', 'WETH_WBTC_PAIR']
     function_elements,contract_elements,core_contract_functions,other_contract_functions = elements_matching(elements_lists,contracts)
 
     relevant_function_elements,function_pairs = relevant_functions(function_elements,interaction_graph,core_contract_functions,other_contract_functions)
@@ -162,21 +160,23 @@ def contextual_prepare(structural_infos,interaction_graph,contracts,agent):
 
     return function_elements,relevant_function_elements,code_snippets,function_pairs
 
-
 class Repair:
-
-    def __init__(self,report_path,project_path,solc_remaps,model_name='gpt-3.5-turbo') -> None:
+    def __init__(self,report_path,project_path,solc_remaps='',model_name='gpt-3.5-turbo') -> None:
         self.report_path = report_path
         self.project_path = project_path
         self.solc_remaps = solc_remaps
         self.model_name = model_name
-        
-        print("reading documents...")
+
+        logging.setLoggerClass(CustomLogger)
+        self.logger = logging.getLogger(report_path)
+        self.logger.setLevel(logging.DEBUG)
+ 
+        self.logger.info("Reading documents...")
         self.report = documentParsing(report_path)
         self.report.parse_raw_file()
         self.structural_informations = self.report.extract_structural_information()
 
-        print("reading program...")
+        self.logger.info("Reading program...")
         self.project_info = StaticUtils(self.project_path,self.solc_remaps)
         ### reading all sol files
         self.project_info.extract_all_files()
@@ -189,12 +189,9 @@ class Repair:
         ## generate interaction graphs
         self.project_info.generate_interaction_graph()
 
-        print("Initialize LLM...")
+        self.logger.info("Initialize LLM...")
         self.generator = LLM(model_name)
         self.validator = LLM("gpt-4")
-
-        print("initlialize log...")
-        self.logger = logging.getLogger("test")
 
     def chainOfprompts(self,structural_infos,context):
         vul_desc = structural_infos['Vulnerability description']
@@ -206,21 +203,21 @@ class Repair:
             codes = k+"\n"+codes+"\n"
             self.contract_codes.append(codes)
 
-        print("attack analyzing...")
+        self.logger.info("Attack Procedure analyzing...")
         attack_procedures = promptUtils.attack_analysis(vul_desc,function_interactions,self.generator)
-        self.logger.info(attack_procedures)
+        # self.logger.info(attack_procedures)
 
-        print("strategies analyzing")
+        self.logger.info("Strategies analyzing")
         strategies = promptUtils.generate_strategies("\n".join(self.contract_codes),attack_procedures,self.generator)
+        # self.logger.info(strategies)
 
-        self.logger.info(strategies)
-
-        print("code generating...")
+        self.logger.info("Code supply...")
         # supple_codes = promptUtils.code_supplement("\n".join(contract_codes),attack_procedures,self.generator)
 
+        self.logger.info("Patch generating...")
         codes_pairs = promptUtils.code_generate("\n".join(self.contract_codes),attack_procedures,strategies,self.generator)
 
-        self.logger.info(codes_pairs)
+        # self.logger.info(codes_pairs)
         return codes_pairs
 
     def validate(self,structural_infos):
@@ -252,18 +249,36 @@ class Repair:
 
         final_patches = self.validate(structural_infos)
 
-        print("Successfully!")
+        self.logger.info("Successfully!")
         return final_patches
 
 if __name__ == "__main__":
-    report_path = "/home/LLM4APR/dataset/3/3.md"
-    project_path = "/home/LLM4APR/dataset/3/"
-    solc_remaps = ["@openzeppelin=/home/LLM4APR/dataset/3/contracts_3/contracts/node_modules/@openzeppelin",
-                "@uniswap=/home/LLM4APR/dataset/3/contracts_3/contracts/node_modules/@uniswap",
-                "hardhat=/home/LLM4APR/dataset/3/contracts_3/contracts/node_modules/hardhat",
-                "interfaces=/home/LLM4APR/dataset/3/contracts_3/interfaces"]
+
+    args = arguments()
+    report_path = args.report_path
+    project_path = args.project_path
+    vul_name = args.vul_name
+    solc_remaps = args.solc_remaps
+    output_path = args.output
+
+    if solc_remaps:
+        solc_remaps = solc_remaps.split(" ")
+        repair = Repair(report_path,project_path,solc_remaps)
+    else:
+        repair = Repair(report_path,project_path)
     
-    # report_path,project_path,solc_remaps = arguments()
-    # solc_remaps = solc_remaps.split(" ")
-    repair = Repair(report_path,project_path,solc_remaps)
-    print(repair.contractFixer())
+    result = repair.contractFixer(vul_name)
+
+    # repair.logger.info("Report path :",report_path)
+    # repair.logger.info("Project path :",project_path)
+    # repair.logger.info("Vulnerability name :",vul_name)
+
+    repair.logger.info(result)
+
+    if output_path:
+        with open(output_path,'w') as f:
+            f.write(result)
+    else:
+        formatted_time = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time()))
+        with open(f"result_{formatted_time}.txt",'w') as f:
+            f.write(result)
